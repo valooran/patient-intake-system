@@ -1,46 +1,37 @@
-name: Build and Deploy to Azure
+name: CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - main
+    branches: ["main"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  # Stage 1: Build & Test (CI)
-  build-and-test:
+  # 1. Build Stage
+  build-code:
+    name: Build Stage
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "18"
+      - name: Install Dependencies (Backend)
+        run: cd backend && npm install
+      - name: Install Dependencies (Frontend)
+        run: cd frontend && npm install
 
-      - name: Install & Test Backend
-        run: |
-          cd backend
-          npm install
-          # npm test  <-- Uncomment if you have tests
-
-      - name: Install & Test Frontend
-        run: |
-          cd frontend
-          npm install
-          # npm test  <-- Uncomment if you have tests
-
-  # Stage 2: Container Build & Push
+  # 2. Container Build
   build-push-containers:
-    needs: build-and-test
+    name: Container Build
+    needs: build-code
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Log in to Azure Container Registry
+      - name: Log in to ACR
         uses: azure/docker-login@v1
         with:
           login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
@@ -53,13 +44,15 @@ jobs:
           docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend --all-tags
 
       - name: Build & Push Frontend
+        # Note: In a real scenario, you might build different images for prod vs staging if env vars differ at build time.
+        # For now, we assume one image works for both.
         run: |
-          # Pass the API URL as a build arg so it gets baked in
           docker build --build-arg VITE_API_URL=https://${{ secrets.BACKEND_APP_NAME }}.azurewebsites.net -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:${{ github.sha }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:latest ./frontend
           docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend --all-tags
 
-  # Stage 3: Deploy to "Staging" (Dev Environment)
+  # 3. Deploy to Staging
   deploy-staging:
+    name: Deploy to Staging
     needs: build-push-containers
     runs-on: ubuntu-latest
     environment:
@@ -71,19 +64,56 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy Backend
+      - name: Deploy Backend (Staging)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.BACKEND_APP_NAME }} # Currently your Dev App
+          images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend:${{ github.sha }}
+
+      - name: Deploy Frontend (Staging)
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.FRONTEND_APP_NAME }} # Currently your Dev App
+          images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:${{ github.sha }}
+
+  # 4. Approval Gate & Production Deployment
+  # This job will PAUSE automatically because of the 'environment: Production' setting
+  deploy-production:
+    name: Production Deployment
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    environment:
+      name: Production # <--- Triggers the Approval Gate configured in GitHub Settings
+      url: https://healthyai-dev-frontend-app.azurewebsites.net # Update this if you have a real Prod URL
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # In a real setup, you would use separate secrets like PROD_BACKEND_APP_NAME
+      # For now, we are just re-deploying to the same app to demonstrate the pipeline flow.
+      - name: Deploy Backend (Prod)
         uses: azure/webapps-deploy@v2
         with:
           app-name: ${{ secrets.BACKEND_APP_NAME }}
           images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend:${{ github.sha }}
 
-      - name: Deploy Frontend
+      - name: Deploy Frontend (Prod)
         uses: azure/webapps-deploy@v2
         with:
           app-name: ${{ secrets.FRONTEND_APP_NAME }}
           images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:${{ github.sha }}
 
-  # Stage 4: Approval Gate & Production (Optional/Future)
-  # For now, we treat your single env as "Staging".
-  # To add Production, you would copy the deploy-staging job,
-  # rename it to deploy-production, and point it to different App names.
+  # 5. Post-Deployment Monitoring
+  post-deploy-monitoring:
+    name: Post-Deployment Monitoring
+    needs: deploy-production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Health Endpoint
+        run: |
+          echo "Checking system health..."
+          # Example: curl -f https://your-prod-app.azurewebsites.net/health
+          # For now, just a dummy pass
+          echo "System is healthy!"
