@@ -1,0 +1,89 @@
+name: Build and Deploy to Azure
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1: Build & Test (CI)
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install & Test Backend
+        run: |
+          cd backend
+          npm install
+          # npm test  <-- Uncomment if you have tests
+
+      - name: Install & Test Frontend
+        run: |
+          cd frontend
+          npm install
+          # npm test  <-- Uncomment if you have tests
+
+  # Stage 2: Container Build & Push
+  build-push-containers:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure Container Registry
+        uses: azure/docker-login@v1
+        with:
+          login-server: ${{ secrets.REGISTRY_LOGIN_SERVER }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build & Push Backend
+        run: |
+          docker build -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend:${{ github.sha }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend:latest ./backend
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend --all-tags
+
+      - name: Build & Push Frontend
+        run: |
+          # Pass the API URL as a build arg so it gets baked in
+          docker build --build-arg VITE_API_URL=https://${{ secrets.BACKEND_APP_NAME }}.azurewebsites.net -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:${{ github.sha }} -t ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:latest ./frontend
+          docker push ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend --all-tags
+
+  # Stage 3: Deploy to "Staging" (Dev Environment)
+  deploy-staging:
+    needs: build-push-containers
+    runs-on: ubuntu-latest
+    environment:
+      name: Staging
+      url: https://${{ secrets.FRONTEND_APP_NAME }}.azurewebsites.net
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Backend
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.BACKEND_APP_NAME }}
+          images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-backend:${{ github.sha }}
+
+      - name: Deploy Frontend
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: ${{ secrets.FRONTEND_APP_NAME }}
+          images: ${{ secrets.REGISTRY_LOGIN_SERVER }}/patient-frontend:${{ github.sha }}
+
+  # Stage 4: Approval Gate & Production (Optional/Future)
+  # For now, we treat your single env as "Staging".
+  # To add Production, you would copy the deploy-staging job,
+  # rename it to deploy-production, and point it to different App names.
