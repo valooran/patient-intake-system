@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: Staging
-      url: https://${{ secrets.FRONTEND_APP_NAME }}.azurewebsites.net
+      url: https://healthyai-dev-frontend-app.azurewebsites.net
     steps:
       - name: Azure Login
         uses: azure/login@v1
